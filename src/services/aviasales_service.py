@@ -36,7 +36,7 @@ class AviasalesService:
         """Форматирование даты для API"""
         try:
             date = datetime.strptime(date_str, '%Y-%m-%d')
-            return date.strftime('%Y-%m')
+            return date.strftime('%Y-%m-%d')
         except Exception as e:
             logger.error(f"Ошибка форматирования даты: {e}")
             return None
