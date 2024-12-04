@@ -9,6 +9,6 @@ load_dotenv()
 
 class Config:
     """Конфигурационные параметры"""
-    TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+    TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    AVIASALES_TOKEN = os.getenv('AVIASALES_TOKEN')
+    AVIASALES_TOKEN = os.getenv('AVIASALES_API_KEY')
