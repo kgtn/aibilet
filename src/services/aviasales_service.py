@@ -5,7 +5,7 @@ import logging
 import json
 from datetime import datetime
 import aiohttp
-from config import Config
+from ..config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +74,11 @@ class AviasalesService:
 
             async with aiohttp.ClientSession() as session:
                 async with session.get(self.base_url, params=query_params) as response:
+                    logger.info(f"API Response Status: {response.status}")
+                    logger.info(f"API Response Headers: {response.headers}")
                     if response.status == 200:
                         data = await response.json()
+                        logger.info(f"API Response Body: {json.dumps(data, ensure_ascii=False)}")
                         tickets = data.get("data", [])
                         
                         if not tickets:
@@ -86,10 +89,15 @@ class AviasalesService:
                         enriched_tickets = []
                         for ticket in tickets:
                             try:
+                                # Преобразуем относительную ссылку в абсолютную
+                                link = ticket.get('link', '')
+                                if link and link.startswith('/'):
+                                    link = f"https://www.aviasales.ru{link}"
+                                
                                 ticket.update({
                                     'origin': params['origin'],
                                     'destination': params['destination'],
-                                    'link': f"https://www.aviasales.ru/search/{ticket['origin']}{ticket['destination']}{datetime.now().strftime('%d%m')}"
+                                    'link': link
                                 })
                                 enriched_tickets.append(ticket)
                             except Exception as e:

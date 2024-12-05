@@ -32,15 +32,17 @@ def format_ticket_message(tickets: list) -> str:
                 f" Цена: {ticket.get('price', 'н/д')} руб",
                 f" Вылет: {format_date(ticket.get('departure_at', 'н/д'))}",
                 f" Прилет: {format_date(ticket.get('arrival_at', 'н/д'))}",
-                f" Время в пути: {format_duration(ticket.get('duration', 0))}",
-                f" Пересадок: {ticket.get('transfers', 0)}"
+                f" Время в пути туда: {format_duration(ticket.get('duration_to', 0))}",
+                f" Пересадок: {ticket.get('transfers', 0)}",
+                f" Ссылка: {ticket.get('link', '')}"
             ]
 
             # Информация о обратном рейсе
             if ticket.get('return_at'):
                 ticket_info.extend([
                     f"\nОбратный рейс:",
-                    f" Вылет: {format_date(ticket['return_at'])}"
+                    f" Вылет: {format_date(ticket['return_at'])}",
+                    f" Время в пути обратно: {format_duration(ticket.get('duration_back', 0))}"
                 ])
 
             message_parts.append("\n".join(ticket_info))
