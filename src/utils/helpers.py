@@ -20,32 +20,49 @@ def format_duration(minutes: int) -> str:
 def format_ticket_message(tickets: list) -> str:
     """Форматирование сообщения с информацией о билетах"""
     if not tickets:
-        return " Билеты не найдены"
+        return "✈️ Билеты не найдены"
 
-    message_parts = [" Найденные билеты:\n"]
+    message_parts = ["🎫 Найденные билеты:"]
 
     for i, ticket in enumerate(tickets[:10], 1):
         try:
-            # Базовая информация о рейсе
-            ticket_info = [
-                f"\n{i}. {ticket.get('origin', 'Город')} {ticket.get('destination', 'Город')}",
-                f" Цена: {ticket.get('price', 'н/д')} руб",
-                f" Вылет: {format_date(ticket.get('departure_at', 'н/д'))}",
-                f" Прилет: {format_date(ticket.get('arrival_at', 'н/д'))}",
-                f" Время в пути туда: {format_duration(ticket.get('duration_to', 0))}",
-                f" Пересадок: {ticket.get('transfers', 0)}",
-                f" Ссылка: {ticket.get('link', '')}"
-            ]
-
-            # Информация о обратном рейсе
+            # Форматируем цену как ссылку в формате Markdown
+            price_link = f"[{ticket.get('price', 'н/д')}₽]({ticket.get('link', '')})"
+            
+            # Формируем информацию о маршруте
+            route_info = (
+                f"\n{i}. 🛫 {ticket.get('origin', '')} ✈️ {ticket.get('destination', '')}"
+            )
+            
+            # Информация о вылете туда
+            departure_info = (
+                f"🛫 Вылет: {format_date(ticket.get('departure_at', 'н/д'))}\n"
+                f"⏱ Длительность: {format_duration(ticket.get('duration_to', 0))}"
+            )
+            
+            # Информация о возвращении
+            return_info = ""
             if ticket.get('return_at'):
-                ticket_info.extend([
-                    f"\nОбратный рейс:",
-                    f" Вылет: {format_date(ticket['return_at'])}",
-                    f" Время в пути обратно: {format_duration(ticket.get('duration_back', 0))}"
-                ])
+                return_info = (
+                    f"\n🛬 Обратно: {format_date(ticket.get('return_at', 'н/д'))}\n"
+                    f"⏱ Длительность: {format_duration(ticket.get('duration_back', 0))}"
+                )
+            
+            # Информация о пересадках
+            transfers = ticket.get('transfers', 0)
+            transfer_emoji = "🔁" if transfers > 0 else "✈️"
+            transfer_info = f"{transfer_emoji} Пересадок: {transfers}"
+            
+            # Собираем всю информацию о билете
+            ticket_info = (
+                f"{route_info}\n"
+                f"{departure_info}\n"
+                f"{return_info}\n"
+                f"{transfer_info}\n"
+                f"💰 Стоимость: {price_link}"
+            )
 
-            message_parts.append("\n".join(ticket_info))
+            message_parts.append(ticket_info)
 
         except KeyError as e:
             print(f"Missing key in ticket data: {e}")
@@ -54,4 +71,4 @@ def format_ticket_message(tickets: list) -> str:
             print(f"Error formatting ticket: {e}")
             continue
 
-    return "\n\n".join(message_parts)
+    return "\n".join(message_parts)

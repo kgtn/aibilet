@@ -84,8 +84,8 @@ async def handle_message(message: Message):
             await status_message.edit_text("😔 К сожалению, билетов по вашему запросу не найдено.")
             return
 
-        # Ранжируем билеты с помощью OpenAI
-        ranked_result = await openai_service.rank_tickets(tickets)
+        # Ранжируем билеты
+        ranked_result = aviasales_service.rank_tickets(tickets)
         
         if not ranked_result or 'ranked_tickets' not in ranked_result:
             await status_message.edit_text("😔 Произошла ошибка при обработке результатов.")
@@ -94,7 +94,7 @@ async def handle_message(message: Message):
         # Форматируем и отправляем результаты
         response = format_ticket_message(ranked_result['ranked_tickets'])
         await status_message.edit_text("🎫 Вот что я нашел:")
-        await message.answer(response)
+        await message.answer(response, parse_mode="Markdown")
 
         # Отправляем краткое описание выбора
         if 'summary' in ranked_result:

@@ -41,6 +41,84 @@ class AviasalesService:
             logger.error(f"Ошибка форматирования даты: {e}")
             return None
 
+    def _calculate_ticket_score(self, ticket: dict) -> float:
+        """Вычисление оценки для билета на основе критериев"""
+        try:
+            # Веса для разных критериев
+            WEIGHTS = {
+                'price': 5.0,
+                'duration': 4.0,
+                'transfers': 2.0,
+                'departure_time': 1.0
+            }
+            
+            # Нормализация цены (меньше лучше)
+            price_score = 1.0 / (float(ticket['price']) / 10000)  # Нормализуем относительно 10000 рублей
+            
+            # Нормализация длительности (меньше лучше)
+            duration = float(ticket.get('duration_to', 0))
+            if ticket.get('duration_back'):
+                duration += float(ticket['duration_back'])
+            duration_score = 1.0 / (duration / 120)  # Нормализуем относительно 2 часов
+            
+            # Нормализация количества пересадок (меньше лучше)
+            transfers = int(ticket.get('transfers', 0))
+            transfers_score = 1.0 / (transfers + 1)
+            
+            # Оценка времени вылета (лучше если в промежутке 6:00-23:00)
+            departure_time = datetime.fromisoformat(ticket['departure_at']).hour
+            departure_score = 1.0 if 6 <= departure_time <= 23 else 0.5
+            
+            # Вычисление общего счета
+            total_score = (
+                WEIGHTS['price'] * price_score +
+                WEIGHTS['duration'] * duration_score +
+                WEIGHTS['transfers'] * transfers_score +
+                WEIGHTS['departure_time'] * departure_score
+            )
+            
+            return total_score
+            
+        except Exception as e:
+            logger.error(f"Ошибка вычисления оценки билета: {e}", exc_info=True)
+            return 0.0
+
+    def rank_tickets(self, tickets: list) -> dict:
+        """Ранжирование билетов по заданным критериям"""
+        try:
+            if not tickets:
+                return {
+                    "ranked_tickets": [],
+                    "summary": "Нет билетов для ранжирования"
+                }
+
+            # Вычисляем оценки для каждого билета
+            scored_tickets = [(ticket, self._calculate_ticket_score(ticket)) for ticket in tickets]
+            
+            # Сортируем билеты по оценке (по убыванию) и берем топ-10
+            scored_tickets.sort(key=lambda x: x[1], reverse=True)
+            top_tickets = [ticket for ticket, _ in scored_tickets[:10]]
+            
+            # Создаем краткое описание ранжирования
+            best_ticket = top_tickets[0]
+            summary = (
+                f"Лучший вариант: {best_ticket['origin']} → {best_ticket['destination']}, "
+                f"цена: {best_ticket['price']} руб., "
+                f"пересадок: {best_ticket.get('transfers', 0)}"
+            )
+            
+            return {
+                "ranked_tickets": top_tickets,
+                "summary": summary
+            }
+            
+        except Exception as e:
+            logger.error(f"Ошибка ранжирования билетов: {e}", exc_info=True)
+            return {
+                "ranked_tickets": tickets[:10] if tickets else [],
+                "summary": "Ошибка при ранжировании билетов"
+            }
+
     async def search_tickets(self, params: dict) -> list:
         """Поиск билетов"""
         try:
