@@ -96,35 +96,37 @@ async def handle_message(message: Message):
             )
             return
 
-        # Проверяем, есть ли указание на начало месяца
-        is_start_of_month = flight_params.get('date_context', {}).get('is_start_of_month', False)
-        
-        # Обновляем статус-сообщение с полными параметрами
+        # Формируем сообщение о поиске
         search_message = (
             f"🔍 Ищу билеты:\n"
             f"✈️ {state.origin_city} ({state.origin}) → {state.destination_city} ({state.destination})\n"
         )
+
+        # Проверяем, нужен ли гибкий поиск
+        is_flexible = flight_params.get('flexible_dates', False)
+        date_context = flight_params.get('date_context', {})
         
-        if is_start_of_month:
-            search_message += f"📅 Ищу варианты с 1 по 5 число\n"
-            if state.return_at:
-                search_message += f"🔄 С возвращением через {(datetime.strptime(state.return_at, '%Y-%m-%d') - datetime.strptime(state.departure_at, '%Y-%m-%d')).days} дней"
+        if is_flexible:
+            if date_context.get('is_start_of_month'):
+                search_message += f"📅 Ищу варианты в начале месяца (1-5 число)\n"
+            else:
+                search_message += f"📅 Ищу варианты около {state.departure_at}\n"
         else:
             search_message += f"📅 Вылет: {state.departure_at}\n"
-            search_message += f"🔄 Возвращение: {state.return_at or 'билет в один конец'}"
         
-        await status_message.edit_text(search_message)
+        if state.return_at:
+            search_message += f"🔄 Возвращение: {state.return_at}\n"
+        else:
+            search_message += "🔄 Билет в один конец\n"
+        
+        await status_message.edit_text(search_message + "\n⏳ Идет поиск...")
 
         # Ищем билеты через Aviasales API
         search_params = state.to_search_params()
-        if is_start_of_month:
-            search_params['date_context'] = {'is_start_of_month': True}
-            if state.return_at:
-                search_params['date_context']['return_days'] = (
-                    datetime.strptime(state.return_at, '%Y-%m-%d') - 
-                    datetime.strptime(state.departure_at, '%Y-%m-%d')
-                ).days
-            tickets = await aviasales_service.search_tickets_in_range(search_params)
+        search_params['date_context'] = date_context
+        
+        if is_flexible:
+            tickets = await aviasales_service.search_tickets_with_flexible_dates(search_params)
         else:
             tickets = await aviasales_service.search_tickets(search_params)
         
@@ -133,19 +135,29 @@ async def handle_message(message: Message):
                 "😔 К сожалению, билетов по вашему запросу не найдено.\n"
                 "Попробуйте изменить даты или направление."
             )
-            # Очищаем состояние диалога
-            dialog_manager.clear_state(message.from_user.id)
             return
 
         # Форматируем и отправляем результаты
-        response = format_ticket_message(tickets)
-        await status_message.edit_text(
-            f"🎫 Вот что я нашел:\n"
+        total_found = tickets.get('total_found', len(tickets['data']))
+        response = format_ticket_message(tickets['data'])
+        
+        result_message = (
+            f"🎫 Найдено {total_found} вариантов. Вот лучшие из них:\n"
             f"✈️ {state.origin_city} ({state.origin}) → {state.destination_city} ({state.destination})\n"
-            f"📅 {state.departure_at} - {state.return_at or 'без обратного билета'}\n"
-            f"💰 Цены указаны в {tickets.get('currency', 'RUB').upper()}\n"
+            f"📅 {state.departure_at}"
         )
-        await message.answer(response, parse_mode="Markdown", disable_web_page_preview=True)
+        
+        if state.return_at:
+            result_message += f" - {state.return_at}"
+        
+        if is_flexible:
+            result_message += "\n💡 Показаны лучшие варианты с гибкими датами"
+        
+        await status_message.edit_text(
+            result_message + "\n\n" + response,
+            disable_web_page_preview=True,
+            parse_mode="HTML"
+        )
         
         # Очищаем состояние диалога после успешного поиска
         dialog_manager.clear_state(message.from_user.id)

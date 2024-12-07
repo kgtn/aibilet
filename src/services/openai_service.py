@@ -29,11 +29,18 @@ class OpenAIService:
                 "destination": "BKK",
                 "origin_city": "Санкт-Петербург",
                 "destination_city": "Бангкок",
-                "departure_at": "2025-02-01",
-                "return_at": "2025-02-15"
+                "departure_at": "2024-02-01",
+                "return_at": "2024-02-15",
+                "flexible_dates": True,
+                "date_context": {
+                    "is_start_of_month": True,
+                    "month_number": 2,
+                    "duration_days": 14
+                }
             }
             
             system_content = f"""Ты помощник по поиску авиабилетов. Извлеки параметры полета из текста. Текущая дата: {current_date.strftime('%Y-%m-%d')}.
+            
             Верни JSON с полями:
             - origin (IATA код города отправления, например LED для Санкт-Петербурга)
             - destination (IATA код города назначения, например BKK для Бангкока)
@@ -41,7 +48,16 @@ class OpenAIService:
             - destination_city (название города назначения)
             - departure_at (дата вылета в формате YYYY-MM-DD)
             - return_at (дата возвращения в формате YYYY-MM-DD, если указано)
-            
+            - flexible_dates (true/false - если пользователю не важны точные даты)
+            - date_context (объект с дополнительной информацией о датах):
+              - is_start_of_month (true/false - если указано "начало месяца")
+              - is_mid_month (true/false - если указана середина месяца)
+              - is_end_month (true/false - если указан конец месяца)
+              - month_number (номер месяца, если указан)
+              - relative_days (количество дней относительно текущей даты, если указано "через N дней")
+              - season (лето/осень/зима/весна, если указан сезон)
+              - duration_days (длительность поездки в днях, если указана)
+
             Примеры городов и их IATA кодов:
             Москва: MOW
             Санкт-Петербург: LED
@@ -52,13 +68,14 @@ class OpenAIService:
             Пхукет: HKT
             
             Правила обработки дат:
-            1. Если указано "начало месяца" - установи дату на 1 число указанного месяца
-            2. Если указана длительность поездки (например, "на 2 недели"), укажи соответствующую дату возврата
+            1. Если указаны неточные даты ("в начале месяца", "где-то в июне") - установи flexible_dates в true
+            2. Если указана длительность поездки - укажи в duration_days
             3. Если год не указан и дата уже прошла в текущем году - используй следующий год
-            
-            Пример запроса: "из Санкт-Петербурга в Бангкок в начале февраля на 2 недели"
-            Пример ответа: {json.dumps(example_response, ensure_ascii=False, indent=4)}
-            """
+            4. Для относительных дат ("через неделю", "через 5 дней") - укажи relative_days
+            5. При указании сезона - установи соответствующий месяц (лето: июнь-август, осень: сентябрь-ноябрь и т.д.)
+
+            Пример запроса: "{text}"
+            Пример ответа: {json.dumps(example_response, ensure_ascii=False, indent=2)}"""
 
             messages = [
                 {"role": "system", "content": system_content},
@@ -95,58 +112,34 @@ class OpenAIService:
                             logger.error(f"Некорректный IATA код {field}: {iata_code}")
                             return {}
                 
-                # Обработка дат
-                if "начал" in text.lower() and any(month in text.lower() for month in ["январ", "феврал", "март", "апрел", "май", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр"]):
-                    logger.info("Обнаружен запрос на начало месяца")
-                    current_year = datetime.now().year
-                    month_names = {
-                        "январ": 1, "феврал": 2, "март": 3, "апрел": 4,
-                        "май": 5, "июн": 6, "июл": 7, "август": 8,
-                        "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12
-                    }
+                # Обработка дат и контекста
+                if params.get('flexible_dates'):
+                    date_context = params.get('date_context', {})
                     
-                    for month_name, month_num in month_names.items():
-                        if month_name in text.lower():
-                            if month_num < datetime.now().month:
-                                year = current_year + 1
-                            else:
-                                year = current_year
+                    # Обработка начала месяца
+                    if date_context.get('is_start_of_month'):
+                        month_number = date_context.get('month_number')
+                        if month_number:
+                            current_year = datetime.now().year
+                            if month_number < datetime.now().month:
+                                current_year += 1
+                            params['departure_at'] = f"{current_year}-{month_number:02d}-01"
                             
-                            departure_date = datetime(year, month_num, 1)
-                            params['departure_at'] = departure_date.strftime('%Y-%m-%d')
-                            
-                            # Обработка длительности поездки
-                            weeks_match = re.search(r'(\d+)\s*недел', text.lower())
-                            if weeks_match:
-                                weeks = int(weeks_match.group(1))
-                                return_date = departure_date + timedelta(weeks=weeks)
+                            # Если указана длительность, рассчитываем дату возврата
+                            if duration_days := date_context.get('duration_days'):
+                                return_date = datetime.strptime(params['departure_at'], '%Y-%m-%d') + timedelta(days=duration_days)
                                 params['return_at'] = return_date.strftime('%Y-%m-%d')
-                                logger.info(f"Установлены даты: вылет {params['departure_at']}, возврат {params['return_at']}")
-                            break
-                
-                # Проверяем корректность дат
-                if params.get('departure_at') and params.get('return_at'):
-                    departure_date = datetime.strptime(params['departure_at'], '%Y-%m-%d')
-                    return_date = datetime.strptime(params['return_at'], '%Y-%m-%d')
-                    days_diff = (return_date - departure_date).days
-                    
-                    # Если в тексте указаны недели, проверяем соответствие
-                    weeks_match = re.search(r'(\d+)\s*недел', text.lower())
-                    if weeks_match:
-                        expected_weeks = int(weeks_match.group(1))
-                        expected_days = expected_weeks * 7
-                        if abs(days_diff - expected_days) > 2:  # Допускаем погрешность в 2 дня
-                            logger.warning(f"Некорректная длительность поездки. Ожидалось {expected_days} дней, получено {days_diff} дней")
-                            params['return_at'] = (departure_date + timedelta(days=expected_days)).strftime('%Y-%m-%d')
-                            logger.info(f"Скорректирована дата возврата на {params['return_at']}")
                 
                 logger.info(f"Финальные извлеченные параметры: {json.dumps(params, ensure_ascii=False)}")
                 return params
                 
             except json.JSONDecodeError as e:
-                logger.error(f"Ошибка парсинга JSON из ответа OpenAI: {str(e)}\nОтвет: {response_text}")
+                logger.error(f"Ошибка декодирования JSON: {str(e)}")
                 return {}
-                
+            except Exception as e:
+                logger.error(f"Ошибка обработки ответа OpenAI: {str(e)}")
+                return {}
+            
         except Exception as e:
             logger.error(f"Критическая ошибка при извлечении параметров полета: {str(e)}", exc_info=True)
             return {}

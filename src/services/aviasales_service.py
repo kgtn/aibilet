@@ -79,42 +79,66 @@ class AviasalesService:
         try:
             # Веса для разных критериев
             WEIGHTS = {
-                'price': 5.0,
-                'duration': 4.0,
-                'transfers': 2.0,
-                'departure_time': 1.0
+                'price': 5.0,      # Цена (самый важный фактор)
+                'duration': 3.0,   # Длительность полета
+                'transfers': 2.0,  # Количество пересадок
+                'time': 1.0,      # Время вылета
+                'airline': 0.5     # Рейтинг авиакомпании
             }
             
-            # Нормализация цены (меньше лучше)
-            price_score = 1.0 / (float(ticket['price']) / 10000)  # Нормализуем относительно 10000 рублей
+            scores = {}
             
-            # Нормализация длительности (меньше лучше)
-            duration = float(ticket.get('duration_to', 0))
-            if ticket.get('duration_back'):
-                duration += float(ticket['duration_back'])
-            duration_score = 1.0 / (duration / 120)  # Нормализуем относительно 2 часов
+            # Оценка цены (обратная зависимость - чем дешевле, тем лучше)
+            base_price = float(ticket['price'])
+            scores['price'] = 1.0 / (base_price / 10000)  # Нормализация относительно 10000
             
-            # Нормализация количества пересадок (меньше лучше)
+            # Оценка длительности (обратная зависимость)
+            duration = float(ticket.get('duration', 0))
+            scores['duration'] = 1.0 / (duration / 240)  # Нормализация относительно 4 часов
+            
+            # Оценка пересадок (обратная зависимость)
             transfers = int(ticket.get('transfers', 0))
-            transfers_score = 1.0 / (transfers + 1)
+            scores['transfers'] = 1.0 / (transfers + 1)
             
-            # Оценка времени вылета (лучше если в промежутке 6:00-23:00)
-            departure_time = datetime.fromisoformat(ticket['departure_at']).hour
-            departure_score = 1.0 if 6 <= departure_time <= 23 else 0.5
+            # Оценка времени вылета (предпочтительно дневное время)
+            departure_hour = datetime.strptime(ticket['departure_at'], '%Y-%m-%dT%H:%M:%S%z').hour
+            if 8 <= departure_hour <= 22:
+                time_score = 1.0
+            elif 6 <= departure_hour < 8 or 22 < departure_hour <= 23:
+                time_score = 0.7
+            else:
+                time_score = 0.3
+            scores['time'] = time_score
             
-            # Вычисление общего счета
-            total_score = (
-                WEIGHTS['price'] * price_score +
-                WEIGHTS['duration'] * duration_score +
-                WEIGHTS['transfers'] * transfers_score +
-                WEIGHTS['departure_time'] * departure_score
-            )
+            # Оценка авиакомпании (можно расширить списком предпочтительных авиакомпаний)
+            scores['airline'] = 1.0  # Базовая оценка для всех авиакомпаний
             
-            return total_score
+            # Вычисление итоговой оценки
+            final_score = sum(WEIGHTS[criterion] * score for criterion, score in scores.items())
+            
+            return final_score
             
         except Exception as e:
-            logger.error(f"Ошибка вычисления оценки билета: {e}", exc_info=True)
+            logger.error(f"Error calculating ticket score: {str(e)}")
             return 0.0
+
+    def _rank_tickets(self, tickets: list) -> list:
+        """Ранжирование билетов по различным критериям"""
+        try:
+            scored_tickets = []
+            for ticket in tickets:
+                score = self._calculate_ticket_score(ticket)
+                scored_tickets.append((score, ticket))
+            
+            # Сортируем по убыванию оценки
+            scored_tickets.sort(reverse=True, key=lambda x: x[0])
+            
+            # Возвращаем только билеты без оценок
+            return [ticket for score, ticket in scored_tickets]
+            
+        except Exception as e:
+            logger.error(f"Error in _rank_tickets: {str(e)}")
+            return tickets
 
     def rank_tickets(self, tickets: list) -> dict:
         """Ранжирование билетов по заданным критериям"""
@@ -341,3 +365,63 @@ class AviasalesService:
                 'data': [],
                 'error': str(e)
             }
+
+    async def search_tickets_with_flexible_dates(self, params: dict) -> dict:
+        """Поиск билетов с гибкими датами"""
+        try:
+            if not self._validate_params(params):
+                return {"success": False, "error": "Invalid parameters"}
+
+            date_context = params.get('date_context', {})
+            base_date = datetime.strptime(params['departure_at'], '%Y-%m-%d')
+            
+            search_dates = []
+            if date_context.get('is_start_of_month'):
+                # Ищем билеты на первые 5 дней месяца
+                for day in range(5):
+                    search_date = base_date + timedelta(days=day)
+                    search_dates.append(search_date)
+            else:
+                # Ищем билеты в диапазоне ±2 дня от указанной даты
+                for day in range(-2, 3):
+                    search_date = base_date + timedelta(days=day)
+                    search_dates.append(search_date)
+
+            all_tickets = []
+            tasks = []
+            
+            # Создаем параметры поиска для каждой даты
+            for search_date in search_dates:
+                search_params = params.copy()
+                search_params['departure_at'] = search_date.strftime('%Y-%m-%d')
+                if params.get('return_at'):
+                    # Сохраняем ту же длительность поездки
+                    duration = (datetime.strptime(params['return_at'], '%Y-%m-%d') - 
+                              datetime.strptime(params['departure_at'], '%Y-%m-%d')).days
+                    search_params['return_at'] = (search_date + timedelta(days=duration)).strftime('%Y-%m-%d')
+                
+                tasks.append(self.search_tickets(search_params))
+            
+            # Выполняем все запросы параллельно
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Собираем все успешные результаты
+            for result in results:
+                if isinstance(result, dict) and result.get('success') and result.get('data'):
+                    all_tickets.extend(result['data'])
+            
+            if not all_tickets:
+                return {"success": False, "error": "No tickets found"}
+            
+            # Ранжируем все найденные билеты
+            ranked_tickets = self._rank_tickets(all_tickets)
+            
+            return {
+                "success": True,
+                "data": ranked_tickets[:10],  # Возвращаем топ-10 лучших вариантов
+                "total_found": len(all_tickets)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in search_tickets_with_flexible_dates: {str(e)}")
+            return {"success": False, "error": str(e)}
