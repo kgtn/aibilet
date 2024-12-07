@@ -19,6 +19,7 @@ class DialogState:
         self.destination_city = None  # Название города назначения
         self.departure_at = None  # Дата вылета
         self.return_at = None  # Дата возврата
+        self.date_context = None  # Контекст дат (гибкие даты, начало месяца и т.д.)
 
     @property
     def is_complete(self) -> bool:
@@ -42,13 +43,15 @@ class DialogState:
             logger.info(f"Обновление состояния из параметров: {json.dumps(params, ensure_ascii=False)}")
             
             # Обновляем все поля, которые есть в параметрах
-            for field in ['origin', 'destination', 'origin_city', 'destination_city', 'departure_at', 'return_at']:
+            for field in ['origin', 'destination', 'origin_city', 'destination_city', 
+                         'departure_at', 'return_at', 'date_context']:
                 if field in params:
                     setattr(self, field, params[field])
             
             logger.info(f"Состояние после обновления: origin={self.origin}, destination={self.destination}, "
                        f"origin_city={self.origin_city}, destination_city={self.destination_city}, "
-                       f"departure_at={self.departure_at}, return_at={self.return_at}")
+                       f"departure_at={self.departure_at}, return_at={self.return_at}, "
+                       f"date_context={json.dumps(self.date_context, ensure_ascii=False) if self.date_context else None}")
         except Exception as e:
             logger.error(f"Ошибка при обновлении состояния: {str(e)}", exc_info=True)
 
@@ -66,11 +69,15 @@ class DialogState:
             params = {
                 'origin': self.origin,
                 'destination': self.destination,
-                'departure_at': self.departure_at
+                'departure_at': self.departure_at,
+                'flexible_dates': True  # Всегда включаем поиск с гибкими датами
             }
 
             if self.return_at:
                 params['return_at'] = self.return_at
+            
+            if self.date_context:
+                params['date_context'] = self.date_context
 
             logger.info(f"Параметры поиска: {json.dumps(params, ensure_ascii=False)}")
             return params

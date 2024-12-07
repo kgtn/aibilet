@@ -23,6 +23,7 @@ class OpenAIService:
             logger.info(f"Начало извлечения параметров. Текст: {text}, Текущее состояние: {json.dumps(current_state, ensure_ascii=False) if current_state else 'None'}")
             
             current_date = datetime.now()
+            next_year = current_date.year + 1
             
             example_response = {
                 "origin": "LED",
@@ -35,11 +36,25 @@ class OpenAIService:
                 "date_context": {
                     "is_start_of_month": True,
                     "month_number": 2,
-                    "duration_days": 14
+                    "duration_days": [15, 20]  # Теперь поддерживаем диапазон
                 }
             }
             
-            system_content = f"""Ты помощник по поиску авиабилетов. Извлеки параметры полета из текста. Текущая дата: {current_date.strftime('%Y-%m-%d')}.
+            system_content = f"""Ты помощник по поиску авиабилетов. Извлеки параметры полета из текста. 
+            Текущая дата: {current_date.strftime('%Y-%m-%d')}.
+            
+            Правила обработки дат:
+            1. Если месяц не указан явно, используй ближайший подходящий месяц в будущем
+            2. Для определения года:
+               - Если указанный месяц раньше или равен текущему → используй {next_year} год
+               - Если указанный месяц позже текущего → используй {current_date.year} год
+            3. При указании "начало месяца" используй первое число месяца
+            4. Если указан диапазон дней (например, "15-20 дней"), верни его как массив [15, 20]
+            
+            Примеры (если текущий месяц декабрь {current_date.year}):
+            - "в феврале" → {next_year}-02 (так как февраль уже в следующем году)
+            - "в январе" → {next_year}-01 (так как январь уже в следующем году)
+            - "в декабре" → {next_year}-12 (так как текущий декабрь уже идет, ищем следующий)
             
             Верни JSON с полями:
             - origin (IATA код города отправления, например LED для Санкт-Петербурга)
@@ -56,16 +71,13 @@ class OpenAIService:
               - month_number (номер месяца, если указан)
               - relative_days (количество дней относительно текущей даты, если указано "через N дней")
               - season (лето/осень/зима/весна, если указан сезон)
-              - duration_days (длительность поездки в днях, если указана)
+              - duration_days (число или массив [мин, макс] для диапазона длительности поездки в днях)
 
-            Примеры городов и их IATA кодов:
-            Москва: MOW
-            Санкт-Петербург: LED
-            Новосибирск: OVB
-            Екатеринбург: SVX
-            Казань: KZN
-            Бангкок: BKK
-            Пхукет: HKT
+            Примеры запросов и их обработки:
+            1. "из Москвы в Париж на 7 дней" -> duration_days: 7
+            2. "из Питера в Бангкок на 15-20 дней" -> duration_days: [15, 20]
+            3. "из Москвы в Рим на неделю" -> duration_days: 7
+            4. "из Питера в Париж на 10-14 дней" -> duration_days: [10, 14]
             
             Правила обработки дат:
             1. Если указаны неточные даты ("в начале месяца", "где-то в июне") - установи flexible_dates в true
@@ -121,14 +133,21 @@ class OpenAIService:
                         month_number = date_context.get('month_number')
                         if month_number:
                             current_year = datetime.now().year
-                            if month_number < datetime.now().month:
+                            # Если указанный месяц меньше или равен текущему, значит это следующий год
+                            # Если указанный месяц позже текущего, оставляем текущий год
+                            if month_number <= datetime.now().month:
                                 current_year += 1
                             params['departure_at'] = f"{current_year}-{month_number:02d}-01"
                             
                             # Если указана длительность, рассчитываем дату возврата
                             if duration_days := date_context.get('duration_days'):
-                                return_date = datetime.strptime(params['departure_at'], '%Y-%m-%d') + timedelta(days=duration_days)
-                                params['return_at'] = return_date.strftime('%Y-%m-%d')
+                                if isinstance(duration_days, list):
+                                    min_duration, max_duration = duration_days
+                                    return_date = datetime.strptime(params['departure_at'], '%Y-%m-%d') + timedelta(days=max_duration)
+                                    params['return_at'] = return_date.strftime('%Y-%m-%d')
+                                else:
+                                    return_date = datetime.strptime(params['departure_at'], '%Y-%m-%d') + timedelta(days=duration_days)
+                                    params['return_at'] = return_date.strftime('%Y-%m-%d')
                 
                 logger.info(f"Финальные извлеченные параметры: {json.dumps(params, ensure_ascii=False)}")
                 return params

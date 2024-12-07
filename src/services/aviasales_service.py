@@ -80,10 +80,8 @@ class AviasalesService:
             # Веса для разных критериев
             WEIGHTS = {
                 'price': 5.0,      # Цена (самый важный фактор)
-                'duration': 3.0,   # Длительность полета
+                'duration': 4.0,   # Длительность полета
                 'transfers': 2.0,  # Количество пересадок
-                'time': 1.0,      # Время вылета
-                'airline': 0.5     # Рейтинг авиакомпании
             }
             
             scores = {}
@@ -96,48 +94,63 @@ class AviasalesService:
             duration = float(ticket.get('duration', 0))
             scores['duration'] = 1.0 / (duration / 240)  # Нормализация относительно 4 часов
             
-            # Оценка пересадок (обратная зависимость)
+            # Оценка количества пересадок (обратная зависимость)
             transfers = int(ticket.get('transfers', 0))
-            scores['transfers'] = 1.0 / (transfers + 1)
+            scores['transfers'] = 1.0 / (transfers + 1)  # +1 чтобы избежать деления на ноль
             
-            # Оценка времени вылета (предпочтительно дневное время)
-            departure_hour = datetime.strptime(ticket['departure_at'], '%Y-%m-%dT%H:%M:%S%z').hour
-            if 8 <= departure_hour <= 22:
-                time_score = 1.0
-            elif 6 <= departure_hour < 8 or 22 < departure_hour <= 23:
-                time_score = 0.7
-            else:
-                time_score = 0.3
-            scores['time'] = time_score
+            # Базовая оценка
+            total_score = sum(scores[key] * WEIGHTS[key] for key in WEIGHTS)
             
-            # Оценка авиакомпании (можно расширить списком предпочтительных авиакомпаний)
-            scores['airline'] = 1.0  # Базовая оценка для всех авиакомпаний
-            
-            # Вычисление итоговой оценки
-            final_score = sum(WEIGHTS[criterion] * score for criterion, score in scores.items())
-            
-            return final_score
+            return total_score
             
         except Exception as e:
-            logger.error(f"Error calculating ticket score: {str(e)}")
+            logger.error(f"Ошибка при расчете оценки билета: {e}", exc_info=True)
             return 0.0
 
     def _rank_tickets(self, tickets: list) -> list:
         """Ранжирование билетов по различным критериям"""
         try:
-            scored_tickets = []
+            if not tickets:
+                return []
+
+            # Сначала сортируем по цене для определения минимальной цены
+            tickets.sort(key=lambda x: x.get('price', float('inf')))
+            min_price = tickets[0]['price']
+
+            # Группируем билеты по ценовым диапазонам (в пределах 10% разницы)
+            price_groups = []
+            current_group = []
+            
             for ticket in tickets:
-                score = self._calculate_ticket_score(ticket)
-                scored_tickets.append((score, ticket))
+                price_diff_percent = ((ticket['price'] - min_price) / min_price) * 100
+                if not current_group or price_diff_percent <= 10:
+                    current_group.append(ticket)
+                else:
+                    if current_group:
+                        price_groups.append(current_group)
+                    current_group = [ticket]
             
-            # Сортируем по убыванию оценки
-            scored_tickets.sort(reverse=True, key=lambda x: x[0])
-            
-            # Возвращаем только билеты без оценок
-            return [ticket for score, ticket in scored_tickets]
-            
+            if current_group:
+                price_groups.append(current_group)
+
+            # Сортируем каждую группу с приоритетом длительности
+            sorted_groups = []
+            for group in price_groups:
+                # Для билетов в пределах 10% разницы в цене увеличиваем вес длительности
+                for ticket in group:
+                    ticket['_score'] = self._calculate_ticket_score(ticket)
+                    if len(group) > 1:  # Если в группе больше одного билета
+                        # Увеличиваем влияние длительности для близких по цене билетов
+                        duration_score = 1.0 / (float(ticket.get('duration', 0)) / 240)
+                        ticket['_score'] += duration_score * 2  # Дополнительный бонус за длительность
+
+                group.sort(key=lambda x: x['_score'], reverse=True)
+                sorted_groups.extend(group)
+
+            return sorted_groups
+
         except Exception as e:
-            logger.error(f"Error in _rank_tickets: {str(e)}")
+            logger.error(f"Ошибка при ранжировании билетов: {e}", exc_info=True)
             return tickets
 
     def rank_tickets(self, tickets: list) -> dict:
@@ -179,74 +192,22 @@ class AviasalesService:
     async def search_tickets(self, params: dict) -> dict:
         """Поиск билетов через API Aviasales"""
         try:
-            logger.info(f"Начало поиска билетов. Параметры: {json.dumps(params, ensure_ascii=False)}")
-            
-            # Проверяем наличие обязательных параметров
-            required_params = ['origin', 'departure_at']
-            if not all(param in params for param in required_params):
-                logger.error(f"Отсутствуют обязательные параметры: {[param for param in required_params if param not in params]}")
-                return {}
+            if not self._validate_params(params):
+                return {"success": False, "error": "Invalid parameters"}
 
-            # Проверяем корректность IATA кодов
-            for field in ['origin', 'destination']:
-                iata_code = params.get(field)
-                if iata_code and not (len(iata_code) == 3 and iata_code.isupper() and iata_code.isalpha()):
-                    logger.error(f"Некорректный IATA код {field}: {iata_code}")
-                    return {}
-
-            # Создаем словарь параметров для API
-            api_params = {
-                'origin': params['origin'],
-                'destination': params.get('destination'),
-                'departure_at': params['departure_at'],
-                'return_at': params.get('return_at'),
-                'sorting': 'price',
-                'direct': 'false',
-                'currency': 'rub',
-                'limit': '30',
-            }
+            # Всегда используем поиск с гибкими датами
+            if params.get('flexible_dates', True):
+                logger.info("Используем поиск с гибкими датами")
+                return await self.search_tickets_with_flexible_dates(params)
             
-            # Удаляем None значения
-            api_params = {k: v for k, v in api_params.items() if v is not None}
-            
-            logger.info(f"Параметры запроса к API: {json.dumps(api_params, ensure_ascii=False)}")
+            logger.info("Начало поиска билетов. Параметры: " + json.dumps(params, ensure_ascii=False))
             
             async with aiohttp.ClientSession() as session:
-                url = f"{self.base_url}/prices_for_dates"
-                logger.info(f"URL запроса: {url}")
+                return await self._search_tickets_for_date(session, params)
                 
-                async with session.get(
-                    url,
-                    params=api_params,
-                    headers={'X-Access-Token': self.api_token}
-                ) as response:
-                    response_text = await response.text()
-                    logger.info(f"Статус ответа: {response.status}")
-                    logger.info(f"Тело ответа: {response_text}")
-                    
-                    if response.status != 200:
-                        logger.error(f"Ошибка API: {response.status} - {response_text}")
-                        return {}
-                    
-                    try:
-                        data = await response.json()
-                        logger.info(f"Получен ответ от API: {json.dumps(data, ensure_ascii=False)}")
-                        
-                        if not data.get('success'):
-                            logger.error(f"Ошибка в ответе API: {data.get('error')}")
-                            return {}
-                        
-                        return self._process_response(data, params)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Ошибка декодирования JSON: {str(e)}")
-                        return {}
-                    
-        except aiohttp.ClientError as e:
-            logger.error(f"Ошибка при запросе к API: {str(e)}", exc_info=True)
-            return {}
         except Exception as e:
-            logger.error(f"Непредвиденная ошибка при поиске билетов: {str(e)}", exc_info=True)
-            return {}
+            logger.error(f"Ошибка при поиске билетов: {e}", exc_info=True)
+            return {'success': False, 'error': str(e)}
 
     async def search_tickets_in_range(self, params: dict) -> dict:
         """Поиск билетов в диапазоне дат"""
@@ -374,42 +335,76 @@ class AviasalesService:
 
             date_context = params.get('date_context', {})
             base_date = datetime.strptime(params['departure_at'], '%Y-%m-%d')
+            logger.info(f"Начинаем поиск с гибкими датами. Базовая дата: {base_date.strftime('%Y-%m-%d')}")
             
             search_dates = []
             if date_context.get('is_start_of_month'):
                 # Ищем билеты на первые 5 дней месяца
+                logger.info("Поиск на первые 5 дней месяца")
                 for day in range(5):
                     search_date = base_date + timedelta(days=day)
                     search_dates.append(search_date)
+                    logger.info(f"Добавлена дата поиска: {search_date.strftime('%Y-%m-%d')}")
             else:
                 # Ищем билеты в диапазоне ±2 дня от указанной даты
+                logger.info("Поиск в диапазоне ±2 дня")
                 for day in range(-2, 3):
                     search_date = base_date + timedelta(days=day)
                     search_dates.append(search_date)
+                    logger.info(f"Добавлена дата поиска: {search_date.strftime('%Y-%m-%d')}")
 
             all_tickets = []
-            tasks = []
             
-            # Создаем параметры поиска для каждой даты
-            for search_date in search_dates:
-                search_params = params.copy()
-                search_params['departure_at'] = search_date.strftime('%Y-%m-%d')
-                if params.get('return_at'):
-                    # Сохраняем ту же длительность поездки
-                    duration = (datetime.strptime(params['return_at'], '%Y-%m-%d') - 
-                              datetime.strptime(params['departure_at'], '%Y-%m-%d')).days
-                    search_params['return_at'] = (search_date + timedelta(days=duration)).strftime('%Y-%m-%d')
+            # Выполняем все запросы параллельно с помощью aiohttp.ClientSession
+            async with aiohttp.ClientSession() as session:
+                tasks = []
                 
-                tasks.append(self.search_tickets(search_params))
-            
-            # Выполняем все запросы параллельно
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Собираем все успешные результаты
-            for result in results:
-                if isinstance(result, dict) and result.get('success') and result.get('data'):
-                    all_tickets.extend(result['data'])
-            
+                # Создаем параметры поиска для каждой даты
+                for search_date in search_dates:
+                    search_params = params.copy()
+                    search_params['departure_at'] = search_date.strftime('%Y-%m-%d')
+                    
+                    if date_context.get('duration_days'):
+                        # Если указан диапазон длительности
+                        duration_days = date_context['duration_days']
+                        if isinstance(duration_days, list):
+                            min_days, max_days = duration_days
+                            logger.info(f"Поиск с диапазоном длительности {min_days}-{max_days} дней")
+                            # Проверяем несколько вариантов длительности с шагом в 2-3 дня
+                            step = max(2, (max_days - min_days) // 3)  # Адаптивный шаг
+                            logger.info(f"Используем шаг {step} дней для поиска")
+                            for duration in range(min_days, max_days + 1, step):
+                                search_params_with_duration = search_params.copy()
+                                return_date = search_date + timedelta(days=duration)
+                                search_params_with_duration['return_at'] = return_date.strftime('%Y-%m-%d')
+                                logger.info(f"Поиск билетов: вылет {search_params_with_duration['departure_at']}, возврат {search_params_with_duration['return_at']} (длительность {duration} дней)")
+                                tasks.append(self._search_tickets_for_date(session, search_params_with_duration))
+                        else:
+                            # Если указана конкретная длительность
+                            return_date = search_date + timedelta(days=duration_days)
+                            search_params['return_at'] = return_date.strftime('%Y-%m-%d')
+                            logger.info(f"Поиск билетов: вылет {search_params['departure_at']}, возврат {search_params['return_at']} (длительность {duration_days} дней)")
+                            tasks.append(self._search_tickets_for_date(session, search_params))
+                    else:
+                        # Поиск билетов только в одну сторону
+                        logger.info(f"Поиск билетов только в одну сторону на дату {search_params['departure_at']}")
+                        tasks.append(self._search_tickets_for_date(session, search_params))
+
+                logger.info(f"Всего создано {len(tasks)} поисковых запросов")
+                
+                # Выполняем все запросы параллельно
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                # Собираем все успешные результаты
+                successful_results = 0
+                for result in results:
+                    if isinstance(result, dict) and result.get('success') and result.get('data'):
+                        all_tickets.extend(result['data'])
+                        successful_results += 1
+                
+                logger.info(f"Успешно выполнено {successful_results} из {len(tasks)} запросов")
+                logger.info(f"Всего найдено {len(all_tickets)} билетов")
+
             if not all_tickets:
                 return {"success": False, "error": "No tickets found"}
             
